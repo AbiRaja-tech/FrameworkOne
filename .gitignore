@@ -1,0 +1,2 @@
+.env
+*.json  # if you keep the service account key as a file
