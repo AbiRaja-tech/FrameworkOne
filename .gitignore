@@ -1,2 +1,6 @@
 .env
 *.json  # if you keep the service account key as a file
+# Google Cloud credentials
+*.json
+!policy_*.json
+!data_*.json
