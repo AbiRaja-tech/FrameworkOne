@@ -17,32 +17,12 @@ import argparse, json, os, time, logging
 # --------------------------------
 # Logging
 # --------------------------------
-def setup_logging(log_level: str = "INFO", log_file: str = "intracity_planner.log"):
-    """Setup logging to both console and file"""
-    log = logging.getLogger("intracity")
-    log.setLevel(getattr(logging, log_level.upper()))
-    
-    # Clear existing handlers
-    log.handlers.clear()
-    
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter("[%(levelname)s] %(message)s")
-    console_handler.setFormatter(console_formatter)
-    log.addHandler(console_handler)
-    
-    # File handler
-    file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-    file_handler.setFormatter(file_formatter)
-    log.addHandler(file_handler)
-    
-    return log
-
-# Initialize logging
-log = setup_logging()
+log = logging.getLogger("intracity")
+if not log.handlers:
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    log.addHandler(h)
+log.setLevel(logging.INFO if os.getenv("LOG_LEVEL","INFO").upper()!="DEBUG" else logging.DEBUG)
 
 # --------------------------------
 # Small helpers
@@ -71,7 +51,7 @@ def _pick(rec: Dict[str, Any], *candidates: str) -> Optional[float]:
         if k in rec:
             val = _num(rec[k])
             if val is not None:
-                return val
+                return v
     return None
 
 def _pick_edge_km(rec: Dict[str, Any]) -> Optional[float]:
@@ -120,18 +100,24 @@ def _get_transfer_cnt(rec: Dict[str, Any], mode: str) -> int:
 # Default policy + loader
 # --------------------------------
 def default_policy() -> Dict[str, Any]:
-    """Default policy with reasonable constraints for planning"""
+    """Default policy with user's exact requirements"""
     return {
-        "unique_id": "default_constraints",
+        "unique_id": "user_requirements",
         "priority_order": ["stamina", "budget", "poi_score", "experience", "comfort"],
+        "priority_weights": {
+            "stamina": 10**12, "budget": 10**12, "poi_score": 10**12, 
+            "experience": 10**12, "comfort": 10**6
+        },
+        
+        # Budget system - FIXED COSTS PER TRIP (not per minute)
         "budget": {
-            "daily_cap": 150.0,
+            "daily_cap": 300.0,
             "mode_fixed_cost": {
-                "walk": 0.0,
-                "train": 1.0,
-                "bus": 2.0,
-                "tram": 0.0,
-                "cab": 5.0
+                "walk": 0.0,    # Free
+                "train": 1.0,   # £1 per trip
+                "bus": 2.0,     # £2 per trip
+                "tram": 0.0,    # Free (or adjust as needed)
+                "cab": 5.0      # Base cost
             },
             "cab_distance_pricing": {
                 "threshold_1": 2.0,
@@ -140,44 +126,57 @@ def default_policy() -> Dict[str, Any]:
                 "cost_over_4km": 15.0
             }
         },
+        
+        # Stamina system - POI-BASED COSTS (not time-based)
         "stamina": {
             "start": 10.0,
-            "poi_visit_cost": 1.5,
-            "poi_liked_reduction": 1.0,
-            "poi_disliked_reduction": 2.0,
-            "meal_gain": 2.0,
+            "max": 12.0,
+            "poi_visit_cost": 1.5,           # Base stamina cost per POI
+            "poi_liked_reduction": 1.0,      # Museums, historic = -1 stamina
+            "poi_disliked_reduction": 2.0,   # Theme parks, bars = -2 stamina
+            "meal_gain": 2.0,                # +2 stamina recovery
             "transport_costs": {
-                "walk_per_hour": 2.0,
-                "train_per_hour": 1.0,
-                "bus_per_hour": 1.0,
-                "tram_per_hour": 1.0,
-                "cab_per_hour": 0.5
+                "walk_per_hour": 2.0,        # Highest penalty
+                "train_per_hour": 1.0,       # Medium penalty
+                "bus_per_hour": 1.0,         # Medium penalty
+                "tram_per_hour": 1.0,        # Medium penalty
+                "cab_per_hour": 0.5          # Lowest penalty
             }
         },
-        "planning": {
-            "max_pois_per_day": 6,
-            "min_pois_per_day": 1,
-            "max_one_way_distance_from_hotel_km": 20.0,
-            "max_total_distance_day_km": 50.0
+        
+        # Transport speeds (only used when Google Sheets data is missing)
+        "transport_speeds_kmph": {
+            "walk": 4.5,      # 4.5 km/h walking speed
+            "bus": 14.0,      # 14 km/h average bus speed
+            "tram": 18.0,     # 18 km/h average tram speed
+            "train": 25.0,    # 25 km/h average train speed
+            "cab": 22.0       # 22 km/h average cab speed
         },
-        "preferences": {
-            "must_include": [],
-            "must_avoid": []
+        
+        # Comfort factors (used in objective function)
+        "comfort_discomfort_per_min": {
+            "walk": 1.0,      # Highest discomfort
+            "train": 0.6,     # Medium discomfort
+            "bus": 0.5,       # Medium discomfort
+            "tram": 0.6,      # Medium discomfort
+            "cab": 0.2        # Lowest discomfort
         },
-        "comfort": {
-            "discomfort_per_min": {
-                "walk": 1.0,
-                "train": 0.6,
-                "bus": 0.5,
-                "tram": 0.6,
-                "cab": 0.2
-            },
-            "transfer_penalty_per_change": 0.5
-        },
-        "solver": {
-            "max_seconds": 10.0,
-            "workers": 8
-        }
+        
+        # POI preferences
+        "must_include": ["museum", "historic"],      # +3 points each
+        "must_avoid": ["theme_parks", "noisy", "bar"], # -2 points each
+        
+        # Planning constraints
+        "max_pois_per_day": 6,
+        "min_pois_per_day": 2,
+        "max_one_way_distance_from_hotel_km": 20.0,
+        "max_total_distance_day_km": 50.0,
+        "walk_only_threshold_km": 0.3,
+        "transfer_penalty_per_change": 0.5,
+        
+        # Solver settings
+        "solver_max_seconds": 10.0,
+        "solver_workers": 8
     }
 
 def _merge_dict(dst: Dict[str, Any], src: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -228,46 +227,12 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     pois = data["pois"]
     N = len(pois)
     
-    # ===== POLICY CONFIGURATION =====
-    stamina_config = policy.get("stamina", {})
-    budget_config = policy.get("budget", {})
-    planning_config = policy.get("planning", {})
-    preferences_config = policy.get("preferences", {})
-    comfort_config = policy.get("comfort", {})
-    objective_config = policy.get("objective", {})
-    solver_config = policy.get("solver", {})
-    
-    # ===== DETAILED DEBUGGING INFORMATION =====
-    log.info(f"=== PLANNING DATA ANALYSIS FOR {hname} ===")
-    log.info(f"[POLICY] Using policy: {policy.get('unique_id', 'agent_generated')}")
-    log.info(f"[POLICY] Policy keys: {list(policy.keys())}")
-    log.info(f"[POLICY] Budget daily cap: £{budget_config.get('daily_cap', 'N/A')}")
-    log.info(f"[POLICY] Stamina start: {stamina_config.get('start', 'N/A')}")
-    log.info(f"[POLICY] Max POIs per day: {planning_config.get('max_pois_per_day', 'N/A')}")
-    log.info(f"Total POIs available: {N}")
-    log.info(f"Total hotels available: {len(hotels)}")
-    
-    # Show POI details
-    log.info(f"\nPOI DETAILS:")
-    for i, poi in enumerate(pois):
-        log.info(f"  POI {i+1}: {poi.get('name', 'N/A')} | Category: {poi.get('category', 'N/A')} | Rating: {poi.get('rating', 'N/A')}")
-    
-    # Show hotel details
-    log.info(f"\nHOTEL DETAILS:")
-    for i, hotel in enumerate(hotels):
-        log.info(f"  Hotel {i+1}: {hotel.get('name', 'N/A')} | City: {hotel.get('city', 'N/A')}")
-    
     # POI name→index map (1..N). Start=0, End=N+1
     idx_of = {_namekey(p["name"]): i+1 for i,p in enumerate(pois)}
     start, end = 0, N+1
     
-    log.info(f"\nPOI INDEX MAPPING:")
-    for name, idx in idx_of.items():
-        log.info(f"  '{name}' -> index {idx}")
-    
     # Select hotel (fallback to first if not exact match)
     H = next((h for h in hotels if _namekey(h.get("name")) == _namekey(hname)), hotels[0])
-    log.info(f"\nSELECTED HOTEL: {H.get('name', 'N/A')}")
     
     # Init structures
     modes = ["walk", "bus", "tram", "train", "cab"]
@@ -277,50 +242,28 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     
     # --- HOTEL ↔ POI from bundle
     hotel_times_all = (data.get("hotel_poi_mode_times") or {})
-    log.info(f"\nHOTEL-POI MODE TIMES DATA:")
-    log.info(f"  Available hotel keys: {list(hotel_times_all.keys())}")
-    
     hrow = hotel_times_all.get(_namekey(hname)) or hotel_times_all.get(_namekey(H.get("name","")))
     if hrow:
-        log.info(f"  Found data for hotel: {_namekey(hname)} or {_namekey(H.get('name',''))}")
-        log.info(f"  Available POI keys in hotel data: {list(hrow.keys())}")
-        
         for poi_name, rec in hrow.items():
             j = idx_of.get(_namekey(poi_name))
             if not j:
-                log.info(f"    POI '{poi_name}' not found in POI list")
                 continue
-            log.info(f"    POI '{poi_name}' -> index {j}")
-            
             edge_km = _pick_edge_km(rec)
             if edge_km is not None:
                 EDGEKM[start][j] = edge_km
                 EDGEKM[j][end]   = edge_km
-                log.info(f"      Edge distance: {edge_km} km")
-            else:
-                log.info(f"      No edge distance found")
-            
             for m in modes:
                 t = _get_time_fields(rec, m)
                 if t is not None and t > 0:
                     TT[m][start][j] = int(t)
                     TT[m][j][end]   = int(t)
-                    log.info(f"      {m} time: {t} minutes")
-                else:
-                    log.info(f"      {m} time: not available")
-            
             TRANSF["bus"][start][j]  = _get_transfer_cnt(rec, "bus")
             TRANSF["bus"][j][end]    = _get_transfer_cnt(rec, "bus")
             TRANSF["tram"][start][j] = _get_transfer_cnt(rec, "tram")
             TRANSF["tram"][j][end]   = _get_transfer_cnt(rec, "tram")
-    else:
-        log.info(f"  NO HOTEL-POI DATA FOUND!")
     
     # --- POI ↔ POI from bundle
     poi_times = (data.get("poi_mode_times") or {})
-    log.info(f"\nPOI-POI MODE TIMES DATA:")
-    log.info(f"  Available POI-POI keys: {list(poi_times.keys())}")
-    
     def _iter_poi_pairs():
         for k, rec in poi_times.items():
             if isinstance(k, (list, tuple)) and len(k)==2:
@@ -328,71 +271,24 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
             elif isinstance(k, str) and "|||" in k:
                 a,b = k.split("|||",1)
                 yield _namekey(a), _namekey(b), rec
-            elif isinstance(k, str) and "->" in k:
-                a,b = k.split("->",1)
-                yield _namekey(a), _namekey(b), rec
             else:
                 continue
     
-    poi_poi_edges = 0
     for src, dst, rec in _iter_poi_pairs():
         i = idx_of.get(src)
         j = idx_of.get(dst)
         if not i or not j or i==j:
-            log.info(f"    Edge '{src}' -> '{dst}': invalid indices (i={i}, j={j})")
             continue
-        
-        poi_poi_edges += 1
-        log.info(f"    Edge '{src}' (index {i}) -> '{dst}' (index {j})")
-        
-        edge_km = _pick_edge_km(rec)
-        if edge_km is not None:
-            EDGEKM[i][j] = edge_km
-            log.info(f"      Distance: {edge_km} km")
-        else:
-            log.info(f"      No distance data")
-        
+        EDGEKM[i][j] = _pick_edge_km(rec)
         for m in modes:
             t = _get_time_fields(rec, m)
             if t is not None and t > 0:
                 TT[m][i][j] = int(t)
-                log.info(f"      {m} time: {t} minutes")
-            else:
-                log.info(f"      {m} time: not available")
-        
         TRANSF["bus"][i][j]  = _get_transfer_cnt(rec, "bus")
         TRANSF["tram"][i][j] = _get_transfer_cnt(rec, "tram")
     
-    log.info(f"  Total POI-POI edges processed: {poi_poi_edges}")
-    
-    # Show final data structures
-    log.info(f"\nFINAL DATA STRUCTURES:")
-    log.info(f"  EDGEKM matrix size: {len(EDGEKM)}x{len(EDGEKM[0]) if EDGEKM else 0}")
-    log.info(f"  TT matrices size: {len(TT)} modes x {len(TT['walk'])}x{len(TT['walk'][0]) if TT['walk'] else 0}")
-    
-    # Count available edges
-    available_edges = 0
-    for i in range(N+2):
-        for j in range(N+2):
-            if i != j and EDGEKM[i][j] is not None:
-                available_edges += 1
-    
-    log.info(f"  Total available edges with distance data: {available_edges}")
-    
-    # Count available transport modes
-    available_modes_count = 0
-    for mode in modes:
-        for i in range(N+2):
-            for j in range(N+2):
-                if i != j and TT[mode][i][j] is not None and TT[mode][i][j] > 0:
-                    available_modes_count += 1
-    
-    log.info(f"  Total available transport mode connections: {available_modes_count}")
-    
     # --- Determine available edges and modes
-    max_one_way_hotel_km = float(planning_config.get("max_one_way_distance_from_hotel_km", 10**9))
-    log.info(f"\nCONSTRAINT ANALYSIS:")
-    log.info(f"  Max one-way distance from hotel: {max_one_way_hotel_km} km")
+    max_one_way_hotel_km = float(policy.get("max_one_way_distance_from_hotel_km", 10**9))
     
     available_modes: Dict[Tuple[int,int], List[str]] = {}
     for i in range(N+2):
@@ -406,7 +302,6 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
             
             # disallow hotel↔POI edges beyond the policy one-way range
             if (i == start or j == end) and edge_km > max_one_way_hotel_km:
-                log.info(f"    Edge {i}->{j}: distance {edge_km}km exceeds hotel limit {max_one_way_hotel_km}km")
                 continue
             
             ms: List[str] = []
@@ -418,137 +313,164 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
             
             if ms:
                 available_modes[(i,j)] = ms
-                log.info(f"    Edge {i}->{j}: distance {edge_km}km, modes {ms}")
-    
-    log.info(f"  Total available edges after constraints: {len(available_modes)}")
     
     if not available_modes:
-        log.info(f"  RESULT: No valid edges found - planning impossible!")
         return {"status": "infeasible", "hotel": H.get("name",""), "reason": "no valid edges"}
-    
-    log.info(f"  RESULT: Planning possible with {len(available_modes)} edges")
     
     # --------------------------------
     # CP-SAT model
     # --------------------------------
     model = cp_model.CpModel()
     
-    log.info(f"\n=== CP-SAT MODEL CONSTRUCTION ===")
-    log.info(f"  [CONSTRAINT] Starting constraint model construction")
-    
     # POI selection variables
     x = {i: model.NewBoolVar(f"x_{i}") for i in range(1, N+1)}
-    log.info(f"  [CONSTRAINT] Created {len(x)} POI selection variables (x_1 to x_{N})")
     
     # Edge (flow) variables only for allowed edges
     y = {(i,j): model.NewBoolVar(f"y_{i}_{j}") for (i,j) in available_modes.keys()}
-    log.info(f"  [CONSTRAINT] Created {len(y)} edge flow variables for valid connections")
     
     # Mode selection for each allowed edge
     x_mode = {}
     for (i,j), ms in available_modes.items():
         for m in ms:
             x_mode[(i,j,m)] = model.NewBoolVar(f"x_mode_{i}_{j}_{m}")
-    log.info(f"  [CONSTRAINT] Created {len(x_mode)} mode selection variables")
     
-    # Simple path constraints: start has one outgoing, end has one incoming
+    # Start has exactly 1 outgoing; End has exactly 1 incoming
     model.Add(sum(y[(start,j)] for (i,j) in y if i == start) == 1)
     model.Add(sum(y[(i,end)]   for (i,j) in y if j == end)   == 1)
-    log.info(f"  [CONSTRAINT] Added start/end flow constraints: exactly 1 outgoing from start, 1 incoming to end")
     
-    # Simple connectivity: each selected POI must have at least one edge
+    # Exactly 1 in and 1 out for each selected POI; 0 otherwise
     for i in range(1, N+1):
         out_edges = [y[(i,j)] for (ii,j) in y if ii == i]
         in_edges  = [y[(k,i)] for (k,jj) in y if jj == i]
-        if out_edges or in_edges:
-            # If POI is selected, must have at least one edge
-            model.Add(sum(out_edges) + sum(in_edges) >= x[i])
+        if out_edges:
+            model.Add(sum(out_edges) == x[i])
         else:
-            # No edges available
             model.Add(x[i] == 0)
-    log.info(f"  [CONSTRAINT] Added simple connectivity: selected POIs have at least one edge")
+        if in_edges:
+            model.Add(sum(in_edges)  == x[i])
+        else:
+            model.Add(x[i] == 0)
     
     # Tie modes to edges
     for (i,j), ms in available_modes.items():
         model.Add(sum(x_mode[(i,j,m)] for m in ms) == y[(i,j)])
-    log.info(f"  [CONSTRAINT] Added mode-edge linking: each edge must have exactly one transport mode")
     
-    # Remove complex TSP constraints for now - just ensure basic connectivity
-    log.info(f"  [CONSTRAINT] Skipped complex TSP constraints for simplicity")
+    # MTZ subtour elimination
+    u = {i: model.NewIntVar(0, N, f"u_{i}") for i in range(N+2)}
+    model.Add(u[start] == 0)
+    for i in range(1, N+1):
+        model.Add(u[i] >= x[i])
+        model.Add(u[i] <= N * x[i])
+    poi_ids = list(range(1, N+1))
+    for i in poi_ids:
+        for j in poi_ids:
+            if i == j: 
+                continue
+            if (i,j) in y:
+                model.Add(u[i] - u[j] + (N) * y[(i,j)] <= N - 1)
     
-    # POI count constraints - simplified
-    min_pois = int(planning_config.get("min_pois_per_day", 1))
-    max_pois = int(planning_config.get("max_pois_per_day", 6))
-    model.Add(sum(x.values()) >= min_pois)
-    model.Add(sum(x.values()) <= max_pois)
-    log.info(f"  [CONSTRAINT] Added POI count constraints: {min_pois} <= POIs <= {max_pois}")
+    # POI count constraints
+    model.Add(sum(x.values()) >= int(policy.get("min_pois_per_day", 1)))
+    model.Add(sum(x.values()) <= int(policy.get("max_pois_per_day", 6)))
     
-    # Distance cap (km) - simplified
-    max_total_km_day = float(planning_config.get("max_total_distance_day_km", 50.0))
-    # Only count hotel-POI distances for simplicity
-    hotel_poi_distances = []
+    # Distance cap (km)
+    max_total_km_day = float(policy.get("max_total_distance_day_km", 50.0))
+    dist_terms = []
     for (i,j) in y:
-        if (i == start or j == end) and EDGEKM[i][j] is not None:
-            hotel_poi_distances.append(int(round(EDGEKM[i][j] * 100)) * y[(i,j)])
-    if hotel_poi_distances:
-        model.Add(sum(hotel_poi_distances) <= int(round(max_total_km_day * 100)))
-        log.info(f"  [CONSTRAINT] Added simplified distance constraint: hotel-POI <= {max_total_km_day} km")
-    else:
-        log.info(f"  [CONSTRAINT] WARNING: No hotel-POI distance terms available")
+        km = EDGEKM[i][j]
+        if km is None:
+            continue
+        dist_terms.append(int(round(km * 100)) * y[(i,j)])
+    if dist_terms:
+        model.Add(sum(dist_terms) <= int(round(max_total_km_day * 100)))
     
-    # ---------- Budget constraints (SIMPLIFIED) ----------
-    mode_fixed_cost = {k: float(v) for k, v in budget_config.get("mode_fixed_cost", {}).items()}
-    daily_cap_cents = int(round(float(budget_config.get("daily_cap", 150.0)) * 100.0))
-    
-    log.info(f"\n=== BUDGET CONSTRAINT ANALYSIS ===")
-    log.info(f"  [CONSTRAINT] Daily budget cap: £{daily_cap_cents/100.0}")
-    log.info(f"  [CONSTRAINT] Mode fixed costs: {mode_fixed_cost}")
-    
-    # Simplified budget: only count hotel-POI transport costs
+    # ---------- Budget constraints (FIXED COSTS) ----------
+    mode_fixed_cost = {k: float(v) for k, v in policy.get("budget", {}).get("mode_fixed_cost", {}).items()}
+    cab_pricing = policy.get("budget", {}).get("cab_distance_pricing", {})
+    daily_cap_cents = int(round(float(policy.get("budget", {}).get("daily_cap", 150.0)) * 100.0))
     travel_cost_cents_terms: List[cp_model.IntVar] = []
-    budget_edges = 0
+    
+    def _intc(v: float) -> int:
+        return int(round(v))
     
     for (i,j), ms in available_modes.items():
-        # Only count hotel-POI edges for budget
-        if (i == start or j == end):
-            for m in ms:
-                tmin = TT[m][i][j]
-                if tmin is None or tmin <= 0:
-                    continue
-                
-                # Fixed cost for transport mode
+        for m in ms:
+            tmin = TT[m][i][j]
+            if tmin is None or tmin <= 0:
+                continue
+            
+            # Calculate cost based on transport mode and distance
+            if m == "cab" and cab_pricing:
+                # Cab pricing based on distance
+                km = EDGEKM[i][j]
+                if km is not None:
+                    if km < cab_pricing.get("threshold_1", 2.0):
+                        cost = cab_pricing.get("cost_under_2km", 5.0)
+                    elif km <= 4.0:
+                        cost = cab_pricing.get("cost_2_to_4km", 10.0)
+                    else:
+                        cost = cab_pricing.get("cost_over_4km", 15.0)
+                else:
+                    cost = mode_fixed_cost.get(m, 5.0)
+            else:
+                # Fixed cost for other modes
                 cost = mode_fixed_cost.get(m, 0.0)
-                c_fixed = int(round(cost * 100))
-                v = model.NewIntVar(0, c_fixed, f"cost_{i}_{j}_{m}")
-                model.Add(v == c_fixed * x_mode[(i,j,m)])
-                travel_cost_cents_terms.append(v)
-                budget_edges += 1
-                log.info(f"    Edge {i}->{j} mode {m}: cost £{cost} (distance {EDGEKM[i][j]}km)")
+            
+            c_fixed = _intc(cost * 100)
+            v = model.NewIntVar(0, c_fixed, f"cost_{i}_{j}_{m}")
+            model.Add(v == c_fixed * x_mode[(i,j,m)])
+            travel_cost_cents_terms.append(v)
     
-    log.info(f"  [CONSTRAINT] Total budget edges processed: {budget_edges}")
-    
-    # Simplified POI costs (assume all free for now)
-    poi_ticket_cents = 0
+    # POI costs
+    poi_price = [0.0]*(N+2)
+    for i,p in enumerate(pois, start=1):
+        poi_price[i] = float(p.get("price", 0.0))
+    poi_ticket_cents = sum(_intc(poi_price[i] * 100) * x[i] for i in range(1, N+1))
     
     daily_spend_cents = model.NewIntVar(0, 10**9, "daily_spend_cents")
     model.Add(daily_spend_cents == poi_ticket_cents + sum(travel_cost_cents_terms))
     model.Add(daily_spend_cents <= daily_cap_cents)
     
-    log.info(f"  [CONSTRAINT] Added simplified budget constraint: hotel-POI transport <= £{daily_cap_cents/100.0}")
+    # ---------- Stamina constraints (POI-BASED) ----------
+    S0 = float(policy.get("stamina", {}).get("start", 10.0))
+    Smax = float(policy.get("stamina", {}).get("max", 12.0))
     
-    # ---------- Stamina constraints (SIMPLIFIED) ----------
-    S0 = float(stamina_config.get("start", 10.0))
+    stamina_terms: List[cp_model.IntVar] = []
+    mode_minutes = {m: [] for m in modes}
     
-    log.info(f"\n=== STAMINA CONSTRAINT ANALYSIS ===")
-    log.info(f"  [CONSTRAINT] Start stamina: {S0}")
+    # Transport stamina costs
+    for (i,j), ms in available_modes.items():
+        for m in ms:
+            tmin = TT[m][i][j]
+            if tmin is None:
+                continue
+            
+            # Get stamina cost per hour for this transport mode
+            stamina_key = f"{m}_per_hour"
+            if stamina_key in policy.get("stamina", {}).get("transport_costs", {}):
+                drain_per_hour = float(policy["stamina"]["transport_costs"][stamina_key])
+            else:
+                drain_per_hour = 0.0
+            
+            # Convert to per-minute and calculate total drain
+            drain_per_min = drain_per_hour / 60.0
+            drain_int = int(round(drain_per_min * tmin * 100))
+            
+            z = model.NewIntVar(0, max(0, drain_int), f"stam_{i}_{j}_{m}")
+            model.Add(z == drain_int * x_mode[(i,j,m)])
+            stamina_terms.append(z)
+            
+            # minutes in mode
+            mm = model.NewIntVar(0, int(tmin), f"min_{i}_{j}_{m}")
+            model.Add(mm == int(tmin) * x_mode[(i,j,m)])
+            mode_minutes[m].append(mm)
     
-    # Simplified stamina: only count POI visit costs
-    poi_base_cost = float(stamina_config.get("poi_visit_cost", 1.5))
-    poi_liked_reduction = float(stamina_config.get("poi_liked_reduction", 1.0))
+    # POI stamina costs based on user preferences
+    poi_base_cost = float(policy["stamina"].get("poi_visit_cost", 1.5))
+    poi_liked_reduction = float(policy["stamina"].get("poi_liked_reduction", 1.0))
+    poi_disliked_reduction = float(policy["stamina"].get("poi_disliked_reduction", 2.0))
     
-    log.info(f"  [CONSTRAINT] POI stamina costs: base={poi_base_cost}, liked={poi_liked_reduction}")
-    
-    # Determine if POI is liked based on category
+    # Determine if POI is liked/disliked based on category
     poi_stamina_costs = []
     for i in range(1, N+1):
         poi = pois[i-1]
@@ -556,40 +478,49 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
         
         # Check if POI matches user preferences
         is_liked = any(pref in category for pref in ["museum", "historic", "cultural"])
+        is_disliked = any(pref in category for pref in ["theme_park", "noisy", "bar"])
         
         if is_liked:
             cost = poi_liked_reduction
-            log.info(f"    [CONSTRAINT] POI {i} '{poi.get('name')}': LIKED category '{category}' -> stamina cost {cost}")
+        elif is_disliked:
+            cost = poi_disliked_reduction
         else:
             cost = poi_base_cost
-            log.info(f"    [CONSTRAINT] POI {i} '{poi.get('name')}': NEUTRAL category '{category}' -> stamina cost {cost}")
         
         poi_stamina_costs.append(int(round(cost * 100)))
     
     # Calculate total POI stamina cost
     poi_stamina_terms = [poi_stamina_costs[i-1] * x[i] for i in range(1, N+1)]
     
-    # Simplified stamina constraint: just ensure we don't go below 0
-    total_poi_stamina = sum(poi_stamina_terms)
-    model.Add(total_poi_stamina <= int(round(S0 * 100)))
+    # Meal stamina recovery
+    poi_is_meal = [0]*(N+2)
+    for i,p in enumerate(pois, start=1):
+        poi_is_meal[i] = 1 if str(p.get("category","")).lower() in {"restaurant","food","meal"} else 0
     
-    log.info(f"  [CONSTRAINT] Added simplified stamina constraint: total POI stamina <= start stamina")
+    meals_count = sum(x[i] * poi_is_meal[i] for i in range(1, N+1))
+    meal_gain_i = int(round(float(policy["stamina"].get("meal_gain", 2.0)) * 100))
+    
+    # Final stamina calculation
+    stamina_end = model.NewIntVar(0, int(round(Smax * 100)), "stamina_end")
+    model.Add(
+        stamina_end
+        == int(round(S0 * 100))
+           - sum(stamina_terms)
+           - sum(poi_stamina_terms)
+           + meal_gain_i * meals_count
+    )
+    
+    # Stamina must be non-negative
+    model.Add(stamina_end >= 0)
     
     # ---------- POI scoring ----------
-    poi_score = 0
-    for i in range(1, N+1):
-        rating = float(pois[i-1].get("rating", 1.0))
-        poi_score += int(round(100 * rating)) * x[i]
+    poi_score = sum(int(round(100 * float(pois[i-1].get("rating", 1.0)))) * x[i] for i in range(1, N+1))
     
     # Experience scoring based on preferences
-    must_include = [s.lower() for s in (preferences_config.get("must_include") or [])]
-    must_avoid   = [s.lower() for s in (preferences_config.get("must_avoid") or [])]
+    must_include = [s.lower() for s in (policy.get("must_include") or [])]
+    must_avoid   = [s.lower() for s in (policy.get("must_avoid") or [])]
     include_bonus = 3  # +3 for must-include
     avoid_penalty = 2   # -2 for must-avoid
-    
-    log.info(f"\n=== POI SCORING ANALYSIS ===")
-    log.info(f"  [CONSTRAINT] Must include categories: {must_include} (+{include_bonus} points each)")
-    log.info(f"  [CONSTRAINT] Must avoid categories: {must_avoid} (-{avoid_penalty} points each)")
     
     poi_cat = [""]*(N+2)
     for i,p in enumerate(pois, start=1):
@@ -600,7 +531,6 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     for i in range(1, N+1):
         if any(kw in poi_cat[i] for kw in must_include):
             include_terms.append(include_bonus * x[i])
-            log.info(f"    [CONSTRAINT] POI {i} '{pois[i-1].get('name')}': matches must-include -> +{include_bonus} points")
     include_term = model.NewIntVar(0, include_bonus * N, "include_term")
     model.Add(include_term == (sum(include_terms) if include_terms else 0))
     
@@ -609,7 +539,6 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     for i in range(1, N+1):
         if any(kw in poi_cat[i] for kw in must_avoid):
             avoid_terms.append(avoid_penalty * x[i])
-            log.info(f"    [CONSTRAINT] POI {i} '{pois[i-1].get('name')}': matches must-avoid -> -{avoid_penalty} points")
     avoid_term = model.NewIntVar(0, avoid_penalty * N, "avoid_term")
     model.Add(avoid_term == (sum(avoid_terms) if avoid_terms else 0))
     
@@ -618,10 +547,7 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     model.Add(experience_score == include_term - avoid_term)
     
     # ---------- Comfort penalties ----------
-    log.info(f"\n=== COMFORT CONSTRAINT ANALYSIS ===")
-    discomfort_per_min = comfort_config.get("discomfort_per_min", {})
-    log.info(f"  [CONSTRAINT] Transport discomfort factors: {discomfort_per_min}")
-    
+    discomfort_per_min = policy.get("comfort_discomfort_per_min", {})
     transport_discomfort_terms: List[cp_model.IntVar] = []
     for (i,j), ms in available_modes.items():
         for m in ms:
@@ -636,9 +562,7 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     transport_discomfort = sum(transport_discomfort_terms)
     
     # Transfer penalty
-    transfer_penalty = int(round(float(comfort_config.get("transfer_penalty_per_change", 0.0)) * 100))
-    log.info(f"  [CONSTRAINT] Transfer penalty per change: {transfer_penalty/100.0}")
-    
+    transfer_penalty = int(round(float(policy.get("transfer_penalty_per_change", 0.0)) * 100))
     transfer_terms: List[cp_model.IntVar] = []
     if transfer_penalty > 0:
         for (i,j), ms in available_modes.items():
@@ -653,23 +577,24 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
                 transfer_terms.append(v)
     transfer_cost = sum(transfer_terms)
     
-    # ---------- Objective function (SIMPLIFIED) ----------
-    # Simple objective: maximize POI score
-    model.Maximize(poi_score)
-    
-    log.info(f"\n=== OBJECTIVE FUNCTION ===")
-    log.info(f"  [CONSTRAINT] Objective: maximize POI score (simplified)")
+    # ---------- Objective function ----------
+    W = policy.get("priority_weights") or _lex_from_order(
+        policy.get("priority_order", ["stamina","budget","poi_score","experience","comfort"])
+    )
+    objective = (
+        + int(W.get("stamina", 0))  * stamina_end           # Maximize stamina
+        - int(W.get("budget", 0))   * daily_spend_cents     # Minimize spending
+        + int(W.get("poi_score", 0))* poi_score             # Maximize POI ratings
+        + int(W.get("experience",0))* experience_score      # Maximize preferences
+        - int(W.get("comfort", 0))  * (transport_discomfort + transfer_cost)  # Minimize discomfort
+    )
+    model.Maximize(objective)
     
     # ---------- Solve ----------
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = float(solver_config.get("max_seconds", 10.0))
-    solver.parameters.num_search_workers = int(solver_config.get("workers", 8))
+    solver.parameters.max_time_in_seconds = float(policy.get("solver_max_seconds", 10.0))
+    solver.parameters.num_search_workers = int(policy.get("solver_workers", 8))
     solver.parameters.log_to_stdout = bool(cp_verbose)
-    
-    log.info(f"\n=== SOLVER CONFIGURATION ===")
-    log.info(f"  Max time: {solver.parameters.max_time_in_seconds} seconds")
-    log.info(f"  Workers: {solver.parameters.num_search_workers}")
-    log.info(f"  Verbose: {cp_verbose}")
     
     t0 = time.perf_counter()
     status = solver.Solve(model)
@@ -677,26 +602,13 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     log.info(f"[{H.get('name','')}] Status={solver.StatusName(status)} solve_time={dt:.2f}s")
     
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        log.info(f"  SOLVER FAILED: {solver.StatusName(status)}")
-        log.info(f"  This means the CP-SAT model could not find a feasible solution")
-        log.info(f"  Possible reasons:")
-        log.info(f"    1. No valid edges between POIs")
-        log.info(f"    2. Distance constraints too restrictive")
-        log.info(f"    3. Budget constraints impossible to satisfy")
-        log.info(f"    4. Stamina requirements impossible to meet")
         return {"status": "infeasible", "hotel": H.get("name",""), "reason": "no feasible solution"}
-    
-    log.info(f"  SOLVER SUCCESS: {solver.StatusName(status)}")
-    log.info(f"  Objective value: {solver.ObjectiveValue()}")
     
     # Reconstruct path
     succ = {i: None for i in range(N+2)}
     for (i,j) in y:
         if solver.Value(y[(i,j)]) == 1:
             succ[i] = j
-    
-    log.info(f"  [PATH] Successor mapping: {succ}")
-    log.info(f"  [PATH] Start node: {start}, End node: {end}")
     
     path = []
     cur = start
@@ -705,18 +617,7 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
     total_distance_km = 0.0
     mode_usage = {"walk":0.0,"bus":0.0,"tram":0.0,"train":0.0,"cab":0.0}
     
-    # Safety check to prevent infinite loops
-    visited = set()
-    max_iterations = N + 2  # Maximum possible path length
-    iteration_count = 0
-    
-    while cur is not None and cur != end and iteration_count < max_iterations:
-        if cur in visited:
-            log.warning(f"Cycle detected in path reconstruction at node {cur}, breaking")
-            break
-        visited.add(cur)
-        iteration_count += 1
-        
+    while cur is not None and cur != end:
         nxt = succ.get(cur)
         if nxt is None:
             break
@@ -757,19 +658,16 @@ def _solve_one_hotel(data: Dict[str, Any], policy: Dict[str, Any], hname: str,
         })
         cur = nxt
     
-    if iteration_count >= max_iterations:
-        log.warning(f"Path reconstruction exceeded maximum iterations ({max_iterations}), path may be incomplete")
-    
     selected_count = sum(solver.Value(x[i]) for i in range(1, N+1))
     out = {
         "status": "ok",
         "hotel": H.get("name",""),
         "objective": solver.ObjectiveValue(),
         "budget_spend": round(solver.Value(daily_spend_cents)/100.0, 2),
-        "stamina_end": 10.0,  # Default value since stamina_end variable was simplified
+        "stamina_end": round(solver.Value(stamina_end)/100.0, 2),
         "poi_score": solver.Value(poi_score)/100.0,
-        "experience_score": 0,  # Default value since experience_score variable was simplified
-        "comfort_penalty": 0.0,  # Default value since comfort variables were simplified
+        "experience_score": solver.Value(experience_score),
+        "comfort_penalty": (solver.Value(transport_discomfort)+solver.Value(transfer_cost))/100.0,
         "selected_count": int(selected_count),
         "visits": path,
         "solve_time_s": round(dt, 2),
@@ -817,16 +715,6 @@ def main():
         data = json.load(f)
     
     policy = load_policy(args.policy) if args.policy else default_policy()
-    
-    # Log policy information
-    log.info(f"=== POLICY LOADING ===")
-    if args.policy:
-        log.info(f"[POLICY] Loaded policy from file: {args.policy}")
-    else:
-        log.info(f"[POLICY] Using default policy (empty)")
-    
-    log.info(f"[POLICY] Policy content: {json.dumps(policy, indent=2)}")
-    
     res = solve_intracity_city_day(data, policy, cp_verbose=args.cp_verbose)
     print(json.dumps(res, indent=2))
     

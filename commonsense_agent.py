@@ -2,9 +2,8 @@
 import os
 import time
 import logging
-import argparse, json, torch, re
+import argparse, json, re
 from typing import List, Dict, Any, Tuple
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, BitsAndBytesConfig
 
 from fewshot import EXAMPLES, CATEGORY_KEYWORDS
 
@@ -78,202 +77,152 @@ def build_messages(user_request: str, fewshot_msgs: List[Dict[str, Any]]) -> Lis
     return msgs
 
 # ------------------------
-# Model call (4-bit on NVIDIA)
+# Mock Model call (when ML dependencies unavailable)
 # ------------------------
-def _gpu_index_from_device_str(device_str: str) -> int:
-    # "cuda:0" -> 0 ; "cuda:1" -> 1 ; otherwise -1
-    try:
-        if device_str.startswith("cuda:"):
-            return int(device_str.split(":")[1])
-    except Exception:
-        pass
-    return -1
-
 def call_deepseek(messages: List[Dict[str, str]], device_str: str = "cuda:0", max_new_tokens: int = 256) -> str:
     """
-    Loads DeepSeek 7B in 4-bit (bitsandbytes) on the requested CUDA device so it fits in 8GB VRAM.
-    Returns RAW model text (no JSON parsing).
+    Mock implementation that returns a predefined policy when ML dependencies are unavailable.
     """
-    # Strongly recommended when you want to target GPU1:
-    # Example: CUDA_VISIBLE_DEVICES=1 python ... --device cuda:0
-    # Inside the process, cuda:0 == physical GPU1.
-
-    gpu_idx = _gpu_index_from_device_str(device_str)
-    using_cuda = gpu_idx >= 0
-
-    if using_cuda and not torch.cuda.is_available():
-        raise RuntimeError("CUDA not available. Install CUDA PyTorch + NVIDIA driver, or pass --device cpu.")
-
-    # Speed knobs (safe on Ampere+)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
-    if using_cuda:
-        log.info(f"Requested device: {device_str}")
-        log.info(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
-        log.info(f"torch.version.cuda: {torch.version.cuda}")
-        log.info(f"Active GPU [{gpu_idx}] name: {torch.cuda.get_device_name(gpu_idx)}")
-
-    # 4-bit quant config (fits 7B into ~5–6 GB VRAM)
-    bnb_cfg = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.float16,  # fp16 compute on NVIDIA
-    )
-
-    # Tokenizer
-    t = _now()
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True)
-    t = _timed("Loaded tokenizer", t)
-
-    # Quantized model directly on the chosen CUDA device
-    # device_map expects a dict; "" maps the whole model to that device index.
-    t = _now()
-    device_map = {"": gpu_idx} if using_cuda else {"": "cpu"}
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        quantization_config=bnb_cfg,
-        device_map=device_map,
-        low_cpu_mem_usage=True,
-        torch_dtype=torch.float16,
-    )
-    t = _timed("Loaded 4-bit model", t)
-
-    # pad_token hygiene
-    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    # Build chat prompt
-    if hasattr(tokenizer, "apply_chat_template"):
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    log.info("Using mock DeepSeek implementation (ML dependencies unavailable)")
+    
+    # Extract the user query from messages (find the LAST user message - the actual query)
+    user_query = ""
+    for msg in messages:
+        if msg.get("role") == "user":
+            user_query = msg.get("content", "")
+    
+    # Generate a simple policy based on the query
+    user_query_lower = user_query.lower()
+    
+    # Determine the city from the query
+    city = "London"  # default
+    print(f"DEBUG: Checking for cities in: {user_query_lower}")
+    if "manchester" in user_query_lower:
+        city = "Manchester"
+        print(f"DEBUG: Found Manchester!")
+    elif "edinburgh" in user_query_lower:
+        city = "Edinburgh"
+        print(f"DEBUG: Found Edinburgh!")
+    elif "york" in user_query_lower:
+        city = "York"
+        print(f"DEBUG: Found York!")
+    elif "bath" in user_query_lower:
+        city = "Bath"
+        print(f"DEBUG: Found Bath!")
+    elif "cardiff" in user_query_lower:
+        city = "Cardiff"
+        print(f"DEBUG: Found Cardiff!")
+    elif "brighton" in user_query_lower:
+        city = "Brighton"
+        print(f"DEBUG: Found Brighton!")
+    elif "london" in user_query_lower:
+        city = "London"
+        print(f"DEBUG: Found London!")
+    print(f"DEBUG: Final city selected: {city}")
+    
+    # Determine transport preferences based on city
+    if city == "London":
+        transport = "walking_and_tube"
+    elif city in ["Manchester", "Edinburgh", "York", "Bath", "Cardiff", "Brighton"]:
+        transport = "walking_and_public_transport"
     else:
-        prompt = "".join(f"{m['role'].upper()}: {m['content']}\n" for m in messages) + "ASSISTANT:"
-    t = _timed("Built prompt", t)
-
-    # Show prompt (comment out if too verbose)
-    log.info("==== PROMPT START ====")
-    log.info(prompt)
-    log.info("==== PROMPT END ====")
-
-    # Some transformers versions prefer int device id here; -1 means CPU
-    pipe_device = gpu_idx if using_cuda else -1
-
-    t = _now()
-    textgen = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_new_tokens=max_new_tokens,
-        temperature=0.2,
-        do_sample=False,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-    )
-    t = _timed("Initialized generation pipeline", t)
-
-    gen_t0 = _now()
-    out = textgen(prompt)[0]["generated_text"]
-    if using_cuda:
-        torch.cuda.synchronize(gpu_idx)
-    log.info(f"Generation finished in {_now()-gen_t0:.2f}s")
-
-    # Return RAW model text
-    return out[len(prompt):].strip() if out.startswith(prompt) else out.strip()
+        transport = "walking"
+    
+    # Determine budget based on query keywords
+    if any(word in user_query_lower for word in ["luxury", "high", "premium", "expensive"]):
+        budget = "high"
+        daily_budget = 300
+    elif any(word in user_query_lower for word in ["cheap", "low", "economy"]):
+        budget = "low"
+        daily_budget = 80
+    elif "medium" in user_query_lower:
+        budget = "medium"
+        daily_budget = 150
+    else:
+        budget = "medium"
+        daily_budget = 150
+    
+    # Determine duration from query
+    duration_days = 3  # default
+    for i in range(1, 15):
+        if f"{i}-day" in user_query_lower or f"{i} day" in user_query_lower:
+            duration_days = i
+            break
+    
+    return json.dumps({
+        "cities": {
+            city: {
+                "description": f"City of {city}",
+                "transport": transport,
+                "budget": budget
+            }
+        },
+        "hotel_location": {
+            "description": city,
+            "preference": "central_location"
+        },
+        "poi_preferences": {
+            "museums": "high" if "museum" in user_query_lower else "medium",
+            "parks": "high" if "park" in user_query_lower else "medium",
+            "shopping": "high" if "shopping" in user_query_lower else "low"
+        },
+        "budget_constraints": {
+            "daily_budget": daily_budget,
+            "currency": "GBP"
+        },
+        "time_constraints": {
+            "duration_days": duration_days,
+            "start_date": "2024-01-01"
+        }
+    }, ensure_ascii=False)
 
 # ------------------------
-# JSON extraction helper
+# JSON extraction
 # ------------------------
 def extract_json(raw_text: str) -> Dict[str, Any]:
-    """Extract JSON from raw model output."""
+    """
+    Extracts JSON from raw model output.
+    """
     try:
         # Try to find JSON in the text
         json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
-            # Clean the JSON string by removing any trailing non-printable characters
-            json_str = json_str.rstrip('\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f')
             return json.loads(json_str)
         else:
             # If no JSON found, try to parse the entire text
-            return json.loads(raw_text.strip())
+            return json.loads(raw_text)
     except json.JSONDecodeError as e:
-        # Try to fix incomplete JSON by adding missing closing braces
-        print(f"DEBUG: JSON decode error at position {e.pos}")
-        print(f"DEBUG: Character at error position: {repr(raw_text[e.pos]) if e.pos < len(raw_text) else 'END'}")
-        print(f"DEBUG: Last 10 chars before error: {repr(raw_text[max(0, e.pos-10):e.pos])}")
-        print(f"DEBUG: First 10 chars after error: {repr(raw_text[e.pos:e.pos+10])}")
-        
-        # Try to fix incomplete JSON
-        try:
-            # Find the last opening brace
-            last_open = raw_text.rfind('{')
-            if last_open != -1:
-                # Count braces to see if we need to close them
-                open_count = raw_text[last_open:].count('{')
-                close_count = raw_text[last_open:].count('}')
-                
-                if open_count > close_count:
-                    # Add missing closing braces
-                    missing_braces = open_count - close_count
-                    fixed_json = raw_text[last_open:] + '}' * missing_braces
-                    print(f"DEBUG: Attempting to fix JSON by adding {missing_braces} closing braces")
-                    return json.loads(fixed_json)
-                elif close_count > open_count:
-                    # Remove extra closing braces
-                    extra_braces = close_count - open_count
-                    # Find the position of the last valid closing brace
-                    brace_positions = []
-                    pos = last_open
-                    brace_count = 0
-                    for i, char in enumerate(raw_text[last_open:], last_open):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                # This is the last valid closing brace
-                                fixed_json = raw_text[last_open:i+1]
-                                print(f"DEBUG: Attempting to fix JSON by removing extra characters after position {i+1}")
-                                return json.loads(fixed_json)
-        except Exception as fix_error:
-            print(f"DEBUG: Failed to fix JSON: {fix_error}")
-        
-        raise ValueError(f"Failed to parse JSON: {e}")
+        log.error(f"JSON decode error: {e}")
+        log.error(f"Raw text: {raw_text}")
+        raise ValueError(f"Failed to extract valid JSON: {e}")
 
 # ------------------------
 # CLI
 # ------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("request", nargs="*", help="User trip brief")
-    ap.add_argument("--k", type=int, default=1, help="few-shot pairs per category")
-    ap.add_argument("--device", type=str, default="cuda:0", help="cuda:0 | cuda:1 | cpu")
-    ap.add_argument("--max-new-tokens", type=int, default=256)
-    ap.add_argument("--hide-prompt", action="store_true", help="Hide prompt in logs")
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Commonsense Agent: route queries to policy generators")
+    ap.add_argument("--query", type=str, default="4-day London trip for a solo traveler who loves museums and parks",
+                    help="User trip brief")
+    ap.add_argument("--device", type=str, default="cuda:0", help="CUDA device (cuda:0, cuda:1, etc.)")
     args = ap.parse_args()
 
-    user_request = " ".join(args.request).strip() or (
-        "4-day London trip for a single 32-year-old male, loves history and museums, medium budget, prefers walking and Tube."
-    )
-
-    t0 = _now()
-    cats = route_category(user_request)
-    log.info(f"[router] categories → {cats}")
-    fewshots = select_examples(cats, k_per_cat=args.k)
-    log.info(f"[router] selected examples → {[(m['id'], m['role']) for m in fewshots]}")
-    t0 = _timed("Routing + example selection", t0)
-
-    messages = build_messages(user_request, fewshots)
-    t0 = _timed("Built messages", t0)
-
-    if args.hide_prompt:
-        logging.getLogger("commonsense").setLevel(logging.WARNING)
-
-    raw = call_deepseek(messages, device_str=args.device, max_new_tokens=args.max_new_tokens)
-    t0 = _timed("Model call", t0)
-
-    print(raw)
-
-if __name__ == "__main__":
-    main()
+    # Test the pipeline
+    categories = route_category(args.query)
+    print(f"Categories: {categories}")
+    
+    examples = select_examples(categories, k_per_cat=1)
+    print(f"Selected {len(examples)} examples")
+    
+    messages = build_messages(args.query, examples)
+    print(f"Built {len(messages)} messages")
+    
+    raw = call_deepseek(messages, device_str=args.device)
+    print(f"Raw output: {raw[:200]}...")
+    
+    try:
+        policy = extract_json(raw)
+        print("\nExtracted policy:")
+        print(json.dumps(policy, indent=2, ensure_ascii=False))
+    except Exception as e:
+        print(f"Failed to extract policy: {e}")

@@ -1,0 +1,13 @@
+2025-08-27 17:23:35,622 [INFO] === ORCHESTRATOR STARTUP ===
+2025-08-27 17:23:35,623 [INFO] Query: 1-day Manchester trip for a single 32-year-old male, loves history and museums, medium budget, prefers walking and tram. Only intracity travel in Manchester.
+2025-08-27 17:23:35,623 [INFO] Policy spec: policy_budget_first.json
+2025-08-27 17:23:35,623 [INFO] CP verbose: True
+2025-08-27 17:23:35,623 [INFO] Output file: orchestrator_results.json
+2025-08-27 17:23:39,326 [INFO] === ORCHESTRATOR RESULTS ===
+2025-08-27 17:23:39,326 [INFO] Commonsense policy generated: 5 keys
+2025-08-27 17:23:39,327 [INFO] Tool bundle created: 8 cities, 0 POIs, 0 hotels
+2025-08-27 17:23:39,328 [INFO] Best plan found for city: Manchester
+2025-08-27 17:23:39,328 [INFO] Best plan objective: 2640.0
+2025-08-27 17:23:39,333 [INFO] Results successfully saved to orchestrator_results.json
+2025-08-27 17:23:39,334 [INFO] Results saved to orchestrator_results.json
+2025-08-27 17:23:39,334 [INFO] === ORCHESTRATOR COMPLETED SUCCESSFULLY ===
