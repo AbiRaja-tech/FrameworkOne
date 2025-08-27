@@ -30,6 +30,31 @@
       "bus_per_hour": 1.0,
       "tram_per_hour": 1.0,
       "cab_per_hour": 0.5
+    },
+    "walking_stamina_cost_per_km": 2.0
+  },
+  
+  "planning": {
+    "max_pois_per_day": 6,
+    "min_pois_per_day": 2,
+    "max_one_way_distance_from_hotel_km": 20.0,
+    "max_total_distance_day_km": 50.0,
+    "max_walking_distance_day_km": 15.0,
+    "max_one_shot_walking_km": 3.0,
+    "walking_preference_threshold_km": 1.5,
+    "max_daily_total_time_hours": 8.0,
+    "max_daily_travel_time_hours": 4.0,
+    "max_poi_to_poi_distance_km": 15.0,
+    "poi_visit_times": {
+      "favorite_categories": 150,
+      "neutral_categories": 90,
+      "disliked_categories": 60
+    },
+    "persona_time_multipliers": {
+      "family": 0.75,
+      "elderly": 0.75,
+      "solo": 1.25,
+      "group": 1.0
     }
   },
   
@@ -55,10 +80,6 @@
   "must_avoid": [
   ],
   
-  "max_pois_per_day": 6,
-  "min_pois_per_day": 2,
-  "max_one_way_distance_from_hotel_km": 20.0,
-  "max_total_distance_day_km": 50.0,
   "walk_only_threshold_km": 0.3,
   "transfer_penalty_per_change": 0.5,
   "solver_max_seconds": 10.0,
